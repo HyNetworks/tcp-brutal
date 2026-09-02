@@ -1,85 +1,116 @@
+#!/usr/bin/env python3
+"""TCP Brutal v2 speed test server.
+
+Each connection starts with a 20-byte header from the client:
+group ID (u64), rate in bytes/s (u64), duration in seconds (u32).
+The server puts the connection into that Brutal group and sends random
+data for the duration. All connections sharing a group ID share the rate.
+"""
+
+import argparse
+import errno
+import os
 import socket
 import struct
+import sys
 import threading
 import time
-import argparse
 
 TCP_CONGESTION = 13
 TCP_BRUTAL_PARAMS = 23301
+TCP_BRUTAL_VERSION = 23302
 
-DEFAULT_PORT = 65432
-DEFAULT_BUFFER_SIZE = 65536
+CWND_GAIN = 15
+HEADER = struct.Struct("!QQI")
+CHUNK_SIZE = 65536
 
 
-def client_thread(conn, addr, duration, buffer_size, rate):
-    print(f"Connected by {addr}")
-    start_time = time.time()
+def brutal_version(conn):
+    conn.setsockopt(socket.IPPROTO_TCP, TCP_CONGESTION, b"brutal")
+    raw = conn.getsockopt(socket.IPPROTO_TCP, TCP_BRUTAL_VERSION, 4)
+    return struct.unpack("<I", raw)[0]
 
-    cwnd_gain = 15
-    brutal_params_value = struct.pack("QI", rate, cwnd_gain)
-    conn.setsockopt(socket.IPPROTO_TCP, TCP_BRUTAL_PARAMS, brutal_params_value)
 
+def check_module():
+    """Exit unless the loaded tcp-brutal module is v2 (supports groups)."""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        with socket.create_connection(listener.getsockname()):
+            conn, _ = listener.accept()
+            with conn:
+                try:
+                    version = brutal_version(conn)
+                except OSError as e:
+                    if e.errno == errno.ENOENT:
+                        sys.exit("error: tcp-brutal kernel module is not loaded")
+                    if e.errno == errno.ENOPROTOOPT:
+                        sys.exit(
+                            "error: tcp-brutal kernel module is v1, v2 is required"
+                        )
+                    sys.exit(f"error: {e}")
+    if version < 0x020000:
+        sys.exit(f"error: tcp-brutal kernel module is too old (0x{version:x})")
+    print(f"tcp-brutal {version >> 16}.{(version >> 8) & 0xFF}.{version & 0xFF}")
+
+
+def recv_exact(conn, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = conn.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf += chunk
+    return buf
+
+
+def handle(conn, addr):
+    peer = f"{addr[0]}:{addr[1]}"
     try:
-        while time.time() - start_time < duration:
-            data = bytearray(buffer_size)
-            conn.sendall(data)
-    except Exception as e:
-        print(f"Error sending data: {e}")
+        header = recv_exact(conn, HEADER.size)
+        if header is None:
+            return
+        group_id, rate, duration = HEADER.unpack(header)
+        conn.setsockopt(socket.IPPROTO_TCP, TCP_CONGESTION, b"brutal")
+        conn.setsockopt(
+            socket.IPPROTO_TCP,
+            TCP_BRUTAL_PARAMS,
+            struct.pack("<QIQ", rate, CWND_GAIN, group_id),
+        )
+        print(f"{peer}: group {group_id:016x}, {rate * 8 / 1e6:.1f} Mbps, {duration}s")
+
+        end = time.monotonic() + duration
+        while time.monotonic() < end:
+            conn.sendall(os.urandom(CHUNK_SIZE))
+    except OSError as e:
+        print(f"{peer}: {e}")
     finally:
         conn.close()
-        print(f"Disconnected {addr}")
+        print(f"{peer}: done")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="TCP Brutal example server",
-    )
+    parser = argparse.ArgumentParser(description="TCP Brutal v2 speed test server")
+    parser.add_argument("-l", "--listen", default="", help="address to listen on")
     parser.add_argument(
-        "-l", "--listen", type=str, default="", help="Address to listen on"
+        "-p", "--port", type=int, default=65432, help="port to listen on"
     )
-    parser.add_argument(
-        "-p", "--port", type=int, default=DEFAULT_PORT, help="Port to listen on"
-    )
-    parser.add_argument(
-        "-d", "--duration", type=int, default=10, help="Send duration in seconds"
-    )
-    parser.add_argument(
-        "-b",
-        "--buffer-size",
-        type=int,
-        default=DEFAULT_BUFFER_SIZE,
-        help="Buffer size",
-    )
-
     args = parser.parse_args()
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.IPPROTO_TCP, TCP_CONGESTION, "brutal".encode())
-        s.bind((args.listen, args.port))
-        s.listen()
+    check_module()
 
-        print(f"Server listening on {args.listen}:{args.port}")
-
-        try:
-            while True:
-                conn, addr = s.accept()
-
-                rate_bytes = conn.recv(4)
-                if not rate_bytes:
-                    conn.close()
-                    continue
-
-                rate = struct.unpack("!I", rate_bytes)[0]
-                rate = int(rate * 1000 * 1000 / 8)  # Convert Mbps to bytes per second
-
-                thread = threading.Thread(
-                    target=client_thread,
-                    args=(conn, addr, args.duration, args.buffer_size, rate),
-                )
-                thread.start()
-        except KeyboardInterrupt:
-            print("\nServer is shutting down.")
+    with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((args.listen, args.port))
+        listener.listen()
+        print(f"listening on {args.listen or '0.0.0.0'}:{args.port}")
+        while True:
+            conn, addr = listener.accept()
+            threading.Thread(target=handle, args=(conn, addr), daemon=True).start()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
