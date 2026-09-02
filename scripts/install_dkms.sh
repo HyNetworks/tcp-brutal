@@ -865,7 +865,7 @@ perform_check() {
 
   echo -n "Checking kernel module ... "
   if kmod_is_loaded "$KERNEL_MODULE_NAME"; then
-    echo "loaded"
+    echo "loaded, version $(cat "/sys/module/$KERNEL_MODULE_NAME/version" 2> /dev/null || echo unknown)"
   else
     echo "not loaded"
   fi

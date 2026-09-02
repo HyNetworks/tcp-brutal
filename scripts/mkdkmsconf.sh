@@ -2,11 +2,21 @@
 
 set -e
 
+cd "$(dirname "$0")/.."
+
+# The version comes from the BRUTAL_VERSION_* macros in brutal.c.
+# Builds that are not on a release tag get a ".r<commits>.<hash>" suffix.
+module_version() {
+  sed -nE 's/^#define BRUTAL_VERSION_(MAJOR|MINOR|PATCH)[[:space:]]+([0-9]+).*/\2/p' brutal.c | paste -sd.
+}
+
 pkgver() {
-  if git describe --tags >/dev/null 2>&1; then
-    git describe --tags | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+  local _version
+  _version="$(module_version)"
+  if git describe --tags --exact-match > /dev/null 2>&1 || ! git rev-parse HEAD > /dev/null 2>&1; then
+    echo "$_version"
   else
-    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+    printf "%s.r%s.%s\n" "$_version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
   fi
 }
 

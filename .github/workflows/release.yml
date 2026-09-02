@@ -16,6 +16,14 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
+      - name: Check that the tag matches the version in brutal.c
+        run: |
+          version=$(./scripts/mkdkmsconf.sh | sed -n 's/^PACKAGE_VERSION="\(.*\)"$/\1/p')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "brutal.c version is $version but the tag is $GITHUB_REF_NAME"
+            exit 1
+          fi
+
       - name: Run build script
         run: |
           make dkms-tarball
