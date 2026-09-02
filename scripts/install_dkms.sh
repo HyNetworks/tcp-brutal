@@ -4,7 +4,7 @@
 # Try `install_dkms.sh --help` for usage.
 #
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2023 Aperture Internet Laboratory
+# Copyright (c) 2023 The Hysteria Project
 #
 
 set -e
