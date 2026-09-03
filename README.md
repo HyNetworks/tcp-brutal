@@ -1,8 +1,8 @@
 # ![TCP Brutal](logo.png)
 
-TCP Brutal is [Hysteria](https://hysteria.network/)'s congestion control algorithm ported to TCP, as a Linux kernel module. Information about Brutal itself can be found in the [Hysteria documentation](https://hysteria.network/docs/advanced/Full-Server-Config/#bandwidth-behavior-explained). As an official subproject of Hysteria, TCP Brutal is actively maintained to be in sync with the Brutal implementation in Hysteria.
+TCP Brutal is [Hysteria](https://hysteria.network/)'s congestion control algorithm ported to TCP, as a Linux kernel module. Information about Brutal itself can be found in the [Hysteria documentation](https://hysteria.network/docs/advanced/Full-Server-Config/#bandwidth-behavior-explained).
 
-**中文文档：[README.zh.md](README.zh.md)**
+As an official subproject of Hysteria, TCP Brutal is actively maintained to be in sync with the Brutal implementation in Hysteria.
 
 ## For users
 
@@ -41,29 +41,32 @@ If you are using NixOS with flakes, you can add the module directly to your `fla
 }
 ```
 
-> Kernel version 4.9 or later is required, version 5.8 or later is recommended. **If your kernel version is earlier than 5.8, only IPv4 is supported.** [(lack of exported symbol `tcpv6_prot`)](https://github.com/torvalds/linux/commit/6abde0b241224347cd88e2ae75902e07f55c42cb#diff-8b341e52e57c996bc4f294087ab526ac0b1c3c47e045557628cc24277cbfda0dR2124)
->
-> **⚠️ Warning** For systems with kernel versions lower than 4.13, you MUST manually enable fq pacing (`tc qdisc add dev eth0 root fq pacing`), otherwise TCP Brutal will not work properly.
+> Kernel version 5.10 or later is required.
 
-### Do I need a new proxy protocol?
+### Do I need to use a specific proxy protocol?
 
-No. TCP Brutal supports all existing TCP proxy protocols, **but requires support from both the client and server software** (to provide bandwidth options, exchange bandwidth information, etc.). Ask the developers of the proxy software you use to add support.
+No. TCP Brutal works with any TCP-based protocol. But it requires both the client and server software to support it. If yours doesn't, go ask the developers to add support loudly!
+
+If you are a developer, see the "For developers" section below.
 
 ### Speed test
 
-The [example](example) directory contains a simple speed test server+client in Python. Usage:
+The [example](example) directory contains a simple speed test server+client in Python. The client opens several connections that share one rate as a group. Usage:
 
 ```bash
-# Server, listening on TCP port 1234
+# Server, listening on TCP port 1234 (requires the v2 module)
 python server.py -p 1234
 
-# Client, connect to example.com:1234, request download speed of 50 Mbps
+# Client, connect to example.com:1234, download at 50 Mbps in total
+# over 4 connections (-n) for 10 seconds (-t)
 python client.py -p 1234 example.com 50
 ```
 
-### Do I need to configure sysctl? / Can I set TCP Brutal as the system's default congestion control?
+### Do not set TCP Brutal as your system's default congestion control
 
-You don't need to, and shouldn't. Unlike BBR, TCP Brutal can only work properly if the program sets the bandwidth using a special sockopt, which most programs don't support unless otherwise specified. Setting it as the default congestion control would slow down all connections to 1 Mbps. Programs that do support it will actively switch to using TCP Brutal congestion control on their own.
+Unlike standard congestion control algorithms, TCP Brutal only works properly when the application sets the target bandwidth through a special socket option, which requires explicit support.
+
+If you set TCP Brutal as the system default, connections from unsupported applications will be limited to 1 Mbps. Applications that support TCP Brutal will enable it automatically when needed, so there's no reason to set it as the system default.
 
 ## For developers
 
@@ -73,13 +76,14 @@ This kernel module adds a new "brutal" TCP congestion control algorithm to the s
 s.setsockopt(socket.IPPROTO_TCP, TCP_CONGESTION, "brutal".encode())
 ```
 
-To set the send rate and congestion window gain (we recommend a default value of 1.5x to 2x, which is expressed as 15/20 since the kernel doesn't support floating point):
+To set the send rate, congestion window gain (we recommend a default value of 1.5x to 2x, which is expressed as 15/20 since the kernel doesn't support floating point) and optionally a group:
 
 ```c
 struct brutal_params
 {
     u64 rate;      // Send rate in bytes per second
     u32 cwnd_gain; // CWND gain in tenths (10=1.0)
+    u64 group_id;  // 0 = rate applies to this connection only (v1 behavior)
 } __packed;
 ```
 
@@ -88,22 +92,39 @@ TCP_BRUTAL_PARAMS = 23301
 
 rate = 2000000 # 2 MB/s
 cwnd_gain = 15
-brutal_params_value = struct.pack("QI", rate, cwnd_gain)
+group_id = 42
+brutal_params_value = struct.pack("<QIQ", rate, cwnd_gain, group_id)
 conn.setsockopt(socket.IPPROTO_TCP, TCP_BRUTAL_PARAMS, brutal_params_value)
 ```
 
+The 12-byte v1 struct (without `group_id`) is still accepted. The same option can be read back with getsockopt; a group member reports the group's rate, cwnd_gain and group_id:
+
+```python
+rate, cwnd_gain, group_id = struct.unpack("<QIQ", conn.getsockopt(socket.IPPROTO_TCP, TCP_BRUTAL_PARAMS, 20))
+```
+
+To check that the module supports groups, read the module version with getsockopt on a connection that already uses brutal. Older modules (and plain TCP sockets) fail with `ENOPROTOOPT`:
+
+```python
+TCP_BRUTAL_VERSION = 23302
+
+# u32: major << 16 | minor << 8 | patch
+version = struct.unpack("<I", conn.getsockopt(socket.IPPROTO_TCP, TCP_BRUTAL_VERSION, 4))[0]
+supports_groups = version >= 0x020000
+```
+
+### Groups
+
+All connections that set the same non-zero `group_id` (from the same user and network namespace) share `rate` as their **total** send rate. Bandwidth is not divided statically: a connection that is the only one sending gets all of it, and connections that send less than their share leave the rest to the others. **Setting params on any member updates the whole group's rate.** A group exists as long as at least one member connection is open.
+
+A typical proxy server puts all connections belonging to one client into one group, keyed by that client's identity, so the client's bandwidth setting is enforced across all of its connections.
+
 ### For proxy developers (important)
 
-Like Hysteria, Brutal is designed for environments where the user knows the bandwidth of their connection, as this information is essential for Brutal to work. While Hysteria's protocol is designed with this in mind, none of the existing TCP proxy protocols (at the time of this writing) have such a mechanism for exchanging bandwidth information between client and server, so that a client can tell the server how fast it should send and vice versa.
+Brutal only works when it knows the bandwidth of the connection, and most TCP proxy protocols do not have a way for the client and server to exchange that information. We suggest using the "destination address" field that every proxy protocol has: a client that supports TCP Brutal requests a connection to a special address such as `_BrutalBwExchange`, and if the server accepts, both sides exchange their bandwidth over that connection.
 
-To work around this, we suggest using the "destination address" field, which every proxy protocol has in one form or another. Clients and servers supporting TCP Brutal can use a special address (e.g. `_BrutalBwExchange`) to indicate that they want to exchange bandwidth information. For example, the client can create a `_BrutalBwExchange` connection request and, if the server accepts, use that connection to exchange bandwidth information with the server.
-
-The following link shows how this is implemented in sing-box:
-
-<https://github.com/SagerNet/sing-mux/commit/6b086ed6bb0790160de73b16683e75efe2220a79>
-
-An important aspect to understand about TCP Brutal's rate setting is that it applies to each individual connection. **This makes it suitable only for protocols that support multiplexing (mux), which allows a client to consolidate all proxy connections into a single TCP connection.** For protocols that require a separate connection for each proxy connection, using TCP Brutal will overwhelm the receiver if multiple connections are active at the same time.
+**TCP Brutal v1 had no concept of groups: the rate applied to each connection individually, so it was only usable with protocols that multiplex all proxy connections into one TCP connection (mux). v2 removes this limitation. For protocols that open a TCP connection per proxy connection, put all connections of the same client into one group so that their combined rate stays within the client's bandwidth. Without a group, v2 behaves like v1.**
 
 ### Compatibility
 
-TCP Brutal is only a congestion control algorithm for TCP and does not alter the TCP protocol itself. Clients and servers can use TCP Brutal unilaterally. The congestion control algorithm controls the sending of data, and since proxy users typically download far more data than they upload, implementing TCP Brutal on the server side alone can reap most of the benefits. (Clients using TCP Brutal could achieve better upload speeds, but many users are on Windows, MacOS, or phones where installing kernel modules is impractical).
+TCP Brutal is only a congestion control algorithm; it does not change the TCP protocol, so either side can use it without the other. It controls sending, and proxy users mostly download, so running it on the server alone gives most of the benefit. A client with TCP Brutal would upload faster, but most users are on Windows, macOS or phones where installing a kernel module is impractical.
