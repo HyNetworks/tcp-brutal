@@ -36,6 +36,11 @@ CURL_FLAGS=(-L -f -q --retry 5 --retry-delay 10 --retry-max-time 60)
 DKMS_MODULE_NAME="tcp-brutal"
 KERNEL_MODULE_NAME="brutal"
 
+# tcp-brutal v2.0.0 and later require this kernel version or later
+V2_MIN_KERNEL_VERSION="5.10"
+# Last version that supports older kernels
+V1_LAST_VERSION="v1.0.3"
+
 
 ###
 # AUTO DETECTED GLOBAL VARIABLE
@@ -443,6 +448,26 @@ vercmp() {
   return
 }
 
+kernel_version() {
+  # e.g. 5.10.0-8-amd64 -> 5.10.0
+  uname -r | grep -oE '^[0-9]+\.[0-9]+(\.[0-9]+)?'
+}
+
+check_kernel_version() {
+  local _version="$1"
+
+  if [[ "$(vercmp "$_version" "v2.0.0")" -lt "0" ]]; then
+    return
+  fi
+  if [[ "$(vercmp "$(kernel_version)" "$V2_MIN_KERNEL_VERSION")" -ge "0" ]]; then
+    return
+  fi
+
+  error "tcp-brutal $_version requires Linux $V2_MIN_KERNEL_VERSION or later, but this system is running $(uname -r)."
+  note "Run '$(script_name) --version $V1_LAST_VERSION' to install the last version that supports this kernel."
+  exit 95
+}
+
 
 ###
 # ARGUMENTS PARSER
@@ -776,6 +801,8 @@ perform_install() {
   fi
 
   if [[ -z "$_local_file" && -n "$_version" ]]; then
+    check_kernel_version "$_version"
+
     local _vercmp="$(vercmp "$_installed_version" "$_version")"
     if [[ "$_vercmp" -lt "0" ]]; then
       _install_needed="1"
