@@ -4,10 +4,10 @@ set -e
 
 cd "$(dirname "$0")/.."
 
-# The version comes from the BRUTAL_VERSION_* macros in brutal.c.
+# The version comes from the BRUTAL_VERSION_* macros in brutal.h.
 # Builds that are not on a release tag get a ".r<commits>.<hash>" suffix.
 module_version() {
-  sed -nE 's/^#define BRUTAL_VERSION_(MAJOR|MINOR|PATCH)[[:space:]]+([0-9]+).*/\2/p' brutal.c | paste -sd.
+  sed -nE 's/^#define BRUTAL_VERSION_(MAJOR|MINOR|PATCH)[[:space:]]+([0-9]+).*/\2/p' brutal.h | paste -sd.
 }
 
 pkgver() {
