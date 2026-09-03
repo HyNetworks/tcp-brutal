@@ -23,7 +23,7 @@ SCRIPT_INITIATOR_URL="https://tcp.hy2.sh"
 SCRIPT_INITIATOR_COMMAND="bash <(curl -fsSL $SCRIPT_INITIATOR_URL)"
 
 # URL of GitHub
-REPO_URL="https://github.com/apernet/tcp-brutal"
+REPO_URL="https://github.com/HyNetworks/tcp-brutal"
 
 # URL of Hysteria 2 API
 HY2_API_BASE_URL="https://api.hy2.io/v1"
@@ -35,6 +35,9 @@ CURL_FLAGS=(-L -f -q --retry 5 --retry-delay 10 --retry-max-time 60)
 
 DKMS_MODULE_NAME="tcp-brutal"
 KERNEL_MODULE_NAME="brutal"
+
+# The rule management tool, built from the DKMS source tree at install time
+BRUTALCTL_PATH="/usr/local/bin/brutalctl"
 
 # tcp-brutal v2.0.0 and later require this kernel version or later
 V2_MIN_KERNEL_VERSION="5.10"
@@ -479,7 +482,7 @@ show_usage_and_exit() {
   echo
   echo -e "Usage:"
   echo
-  echo -e "${tbold}Install tcp-brutal${treset}"
+  echo -e "${tbold}Install tcp-brutal${treset} (the kernel module, and brutalctl to $BRUTALCTL_PATH)"
   echo -e "\t$(script_name) [install] [ -f | -l <file> | --version <version> ]"
   echo -e "Options:"
   echo -e "\t-f, --force\tForce re-install latest or specified version even if it has been installed."
@@ -617,6 +620,38 @@ dkms_install_tarball() {
   if ! dkms_ldtarball "$_tarball"; then
     error "Failed to install DKMS tarball, please check above output or try to uninstall first."
     return 1
+  fi
+}
+
+brutalctl_install() {
+  local _version="$(dkms_get_installed_versions "$DKMS_MODULE_NAME" | head -1)"
+  local _source="/usr/src/$DKMS_MODULE_NAME-${_version#v}/tools/brutalctl.c"
+  local _cc
+
+  echo -n "Installing brutalctl to $BRUTALCTL_PATH ... "
+  if [[ ! -f "$_source" ]]; then
+    echo "skipped (not part of $_version)"
+    return
+  fi
+  if has_command cc; then
+    _cc="cc"
+  elif has_command gcc; then
+    _cc="gcc"
+  else
+    echo "skipped (no C compiler)"
+    return
+  fi
+  if "$_cc" -O2 -Wall -o "$BRUTALCTL_PATH" "$_source"; then
+    echo "ok"
+  else
+    warning "Failed to build brutalctl, the kernel module is not affected."
+  fi
+}
+
+brutalctl_uninstall() {
+  if [[ -f "$BRUTALCTL_PATH" ]]; then
+    echo -n "Removing $BRUTALCTL_PATH ... "
+    rm -f "$BRUTALCTL_PATH" && echo "ok"
   fi
 }
 
@@ -830,6 +865,8 @@ perform_install() {
     warning "Error occurred in 'dkms autoinstall', please check above output."
   fi
 
+  brutalctl_install
+
   kmod_setup_autoload "$KERNEL_MODULE_NAME"
 
   if [[ -z "$_install_needed" ]]; then
@@ -869,6 +906,8 @@ perform_uninstall() {
   kmod_unsetup_autoload "$KERNEL_MODULE_NAME"
 
   dkms_remove_modules "$DKMS_MODULE_NAME" ""
+
+  brutalctl_uninstall
 
   if ! kmod_unload_if_loaded "$KERNEL_MODULE_NAME"; then
     warning "tcp-brutal is successfully uninstall from your server, but failed to unload from the kernel."

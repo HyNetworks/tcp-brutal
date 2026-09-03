@@ -71,13 +71,25 @@ def handle(conn, addr):
         if header is None:
             return
         group_id, rate, duration = HEADER.unpack(header)
-        conn.setsockopt(socket.IPPROTO_TCP, TCP_CONGESTION, b"brutal")
-        conn.setsockopt(
-            socket.IPPROTO_TCP,
-            TCP_BRUTAL_PARAMS,
-            struct.pack("<QIQ", rate, CWND_GAIN, group_id),
-        )
-        print(f"{peer}: group {group_id:016x}, {rate * 8 / 1e6:.1f} Mbps, {duration}s")
+        try:
+            conn.setsockopt(socket.IPPROTO_TCP, TCP_CONGESTION, b"brutal")
+        except PermissionError:
+            # A "congctl lock" route pinned the algorithm; fine if it is brutal
+            cc = conn.getsockopt(socket.IPPROTO_TCP, TCP_CONGESTION, 16).rstrip(b"\0")
+            if cc != b"brutal":
+                raise
+        try:
+            conn.setsockopt(
+                socket.IPPROTO_TCP,
+                TCP_BRUTAL_PARAMS,
+                struct.pack("<QIQ", rate, CWND_GAIN, group_id),
+            )
+            print(
+                f"{peer}: group {group_id:016x}, {rate * 8 / 1e6:.1f} Mbps, {duration}s"
+            )
+        except PermissionError:
+            # A locked destination rule governs this connection: just send
+            print(f"{peer}: governed by a destination rule, {duration}s")
 
         end = time.monotonic() + duration
         while time.monotonic() < end:
