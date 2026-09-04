@@ -2,7 +2,9 @@ KERNEL_RELEASE  ?= $(shell uname -r)
 KERNEL_DIR      ?= /lib/modules/$(KERNEL_RELEASE)/build
 DKMS_TARBALL    ?= dkms.tar.gz
 TAR             ?= tar
-SRCS            := brutal.h brutal_cc.c brutal_sockopt.c brutal_rules.c tools/brutalctl.c tools/Makefile
+CLANG_FORMAT    ?= clang-format-18
+SRCS            := brutal.h brutal_cc.c brutal_sockopt.c brutal_rules.c tools/brutalctl.c tools/Makefile .clang-format
+FORMAT_SRCS     := $(filter %.c %.h,$(SRCS))
 obj-m           += brutal.o
 brutal-objs     := brutal_cc.o brutal_sockopt.o brutal_rules.o
 
@@ -22,6 +24,13 @@ load:
 
 unload:
 	sudo rmmod brutal
+
+.PHONY: format format-check
+format:
+	$(CLANG_FORMAT) --style=file -i $(FORMAT_SRCS)
+
+format-check:
+	$(CLANG_FORMAT) --style=file --dry-run --Werror $(FORMAT_SRCS)
 
 .PHONY: dkms-tarball clean-dkms-tarball clean-dkms.conf
 

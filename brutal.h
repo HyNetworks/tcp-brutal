@@ -21,7 +21,7 @@
 #define INIT_PACING_RATE 125000 // 1 Mbps
 #define INIT_CWND_GAIN 20
 
-#define MIN_PACING_RATE 62500 // 500 Kbps
+#define MIN_PACING_RATE 62500           // 500 Kbps
 #define MAX_PACING_RATE 125000000000ULL // 1 Tbps; keeps all the u64 arithmetic in range
 #define MIN_CWND_GAIN 5
 #define MAX_CWND_GAIN 80

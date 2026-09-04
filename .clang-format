@@ -1,0 +1,6 @@
+# clang-format 18; preserve the existing layout and kernel include order.
+BasedOnStyle: Microsoft
+BreakBeforeBraces: Allman
+ColumnLimit: 0
+SortIncludes: Never
+ReflowComments: false
