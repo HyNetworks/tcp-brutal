@@ -79,6 +79,8 @@ static u32 brutal_burst_estimate(const struct sock *sk, u64 rate, u32 unsent)
 #endif
     bytes = min_t(unsigned long, bytes, sk->sk_gso_max_size);
     segs = clamp_t(u32, bytes / tp->mss_cache, 2, sk->sk_gso_max_segs);
+    segs = min(segs, tp->snd_cwnd - tcp_packets_in_flight(tp));
+    unsent = min(unsent, tcp_wnd_end(tp) - tp->snd_nxt);
     return min_t(u32, segs * tp->mss_cache, unsent);
 }
 
