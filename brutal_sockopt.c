@@ -6,6 +6,9 @@
 #if IS_ENABLED(CONFIG_IPV6)
 #include <net/transp_v6.h>
 #endif
+#if IS_ENABLED(CONFIG_TLS)
+#include <net/tls.h>
+#endif
 
 static DEFINE_HASHTABLE(brutal_groups, 8);
 static DEFINE_SPINLOCK(brutal_groups_lock);
@@ -264,12 +267,30 @@ void brutal_sockopt_install(struct sock *sk)
         WARN_ON_ONCE(sk->sk_family != AF_INET && sk->sk_family != AF_INET6);
 }
 
+static void brutal_restore_proto(struct proto **protp)
+{
+    struct proto *prot = READ_ONCE(*protp);
+
+    if (prot == &tcp_prot_override)
+        WRITE_ONCE(*protp, &tcp_prot);
+#ifdef _TRANSP_V6_H
+    else if (prot == &tcpv6_prot_override)
+        WRITE_ONCE(*protp, &tcpv6_prot);
+#endif // _TRANSP_V6_H
+}
+
 void brutal_sockopt_uninstall(struct sock *sk)
 {
-    if (sk->sk_prot == &tcp_prot_override)
-        sk->sk_prot = &tcp_prot;
-#ifdef _TRANSP_V6_H
-    else if (sk->sk_prot == &tcpv6_prot_override)
-        sk->sk_prot = &tcpv6_prot;
-#endif // _TRANSP_V6_H
+    brutal_restore_proto(&sk->sk_prot);
+#if IS_ENABLED(CONFIG_TLS)
+    if (inet_csk(sk)->icsk_ulp_ops &&
+        !strcmp(inet_csk(sk)->icsk_ulp_ops->name, "tls"))
+    {
+        struct tls_context *ctx = tls_get_ctx(sk);
+
+        // TLS retains the base proto for sockopts and restores it on close.
+        if (ctx)
+            brutal_restore_proto(&ctx->sk_proto);
+    }
+#endif
 }
