@@ -65,29 +65,35 @@ void brutal_update_rate(struct sock *sk)
     WRITE_ONCE(sk->sk_pacing_rate, min_t(u64, rate, READ_ONCE(sk->sk_max_pacing_rate)));
 }
 
-// Bytes tcp_write_xmit is about to send in one go (mirrors tcp_tso_autosize)
-static u32 brutal_burst_estimate(const struct sock *sk, u64 rate, u32 unsent)
+// Segments tcp_write_xmit puts in one skb at this rate (mirrors tcp_tso_autosize)
+static u32 brutal_tso_segs_estimate(const struct sock *sk, u64 rate, u32 mss)
 {
-    const struct tcp_sock *tp = tcp_sk(sk);
     unsigned long bytes = rate >> READ_ONCE(sk->sk_pacing_shift);
-    u32 segs;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0)
-    u32 r = tcp_min_rtt(tp) >> READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_tso_rtt_log);
+    u32 r = tcp_min_rtt(tcp_sk(sk)) >> READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_tso_rtt_log);
     if (r < BITS_PER_TYPE(sk->sk_gso_max_size))
         bytes += sk->sk_gso_max_size >> r;
 #endif
     bytes = min_t(unsigned long, bytes, sk->sk_gso_max_size);
-    segs = clamp_t(u32, bytes / tp->mss_cache, 2, sk->sk_gso_max_segs);
+    return clamp_t(u32, bytes / mss, 2, sk->sk_gso_max_segs);
+}
+
+// Bytes tcp_write_xmit is about to send in one go
+static u32 brutal_burst_estimate(const struct sock *sk, u64 rate, u32 unsent)
+{
+    const struct tcp_sock *tp = tcp_sk(sk);
+    u32 segs = brutal_tso_segs_estimate(sk, rate, tp->mss_cache);
+
     segs = min(segs, tp->snd_cwnd - tcp_packets_in_flight(tp));
     unsent = min(unsent, tcp_wnd_end(tp) - tp->snd_nxt);
     return min_t(u32, segs * tp->mss_cache, unsent);
 }
 
-// Called once at the start of every tcp_write_xmit / tcp_xmit_retransmit_queue,
-// under the socket lock, before the kernel checks pacing. This is where a
-// group member claims its slot on the group clock.
-static u32 brutal_min_tso_segs(struct sock *sk)
+// Called from the TSO hook, which the kernel invokes once at the start of every
+// tcp_write_xmit / tcp_xmit_retransmit_queue, under the socket lock, before it
+// checks pacing. This is where a group member claims its slot on the group clock.
+static void brutal_group_reserve(struct sock *sk)
 {
     struct tcp_sock *tp = tcp_sk(sk);
     struct brutal *brutal = inet_csk_ca(sk);
@@ -97,7 +103,7 @@ static u32 brutal_min_tso_segs(struct sock *sk)
     u32 unsent, burst;
 
     if (!g)
-        return 2;
+        return;
 
     rate = brutal_effective_rate(brutal);
 
@@ -112,7 +118,7 @@ static u32 brutal_min_tso_segs(struct sock *sk)
             // Pacing timer wake-up (or a blocked send): the slot is still ours
             if (tp->tcp_wstamp_ns < brutal->resv_start_ns)
                 tp->tcp_wstamp_ns = brutal->resv_start_ns;
-            return 2;
+            return;
         }
         delta = (s64)sent - (s64)brutal->resv_bytes; // < 0: give time back
         spin_lock_bh(&g->lock);
@@ -130,11 +136,11 @@ static u32 brutal_min_tso_segs(struct sock *sk)
     if (!unsent)
     {
         if (tp->lost_out <= tp->retrans_out)
-            return 2;
+            return;
         unsent = tp->mss_cache; // retransmission pending
     }
     if (tcp_packets_in_flight(tp) >= tp->snd_cwnd || !after(tcp_wnd_end(tp), tp->snd_nxt))
-        return 2;
+        return;
 
     burst = brutal_burst_estimate(sk, rate, unsent);
 
@@ -148,8 +154,23 @@ static u32 brutal_min_tso_segs(struct sock *sk)
     brutal->resv_bytes_sent = tp->bytes_sent;
     if (tp->tcp_wstamp_ns < start)
         tp->tcp_wstamp_ns = start;
+}
+
+#ifdef BRUTAL_HAVE_TSO_SEGS
+// Kernels with the BBRv3 patchset (XanMod and others): tso_segs replaces
+// tcp_tso_autosize, so the return value is the burst size, not a floor.
+static u32 brutal_tso_segs(struct sock *sk, unsigned int mss_now)
+{
+    brutal_group_reserve(sk);
+    return brutal_tso_segs_estimate(sk, READ_ONCE(sk->sk_pacing_rate), mss_now);
+}
+#else
+static u32 brutal_min_tso_segs(struct sock *sk)
+{
+    brutal_group_reserve(sk);
     return 2;
 }
+#endif
 
 static void brutal_init(struct sock *sk)
 {
@@ -233,7 +254,11 @@ struct tcp_congestion_ops tcp_brutal_ops = {
     .cong_control = brutal_main,
     .undo_cwnd = brutal_undo_cwnd,
     .ssthresh = brutal_ssthresh,
+#ifdef BRUTAL_HAVE_TSO_SEGS
+    .tso_segs = brutal_tso_segs,
+#else
     .min_tso_segs = brutal_min_tso_segs,
+#endif
 };
 
 static int __init brutal_register(void)
