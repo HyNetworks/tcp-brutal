@@ -71,9 +71,11 @@ mktemp() {
   command mktemp "$@" "/tmp/brutalinst.XXXXXXXXXX"
 }
 
+# Colors are optional: without a terminal (no $TERM, or TERM=dumb) tput fails,
+# which would kill the script under set -e.
 tput() {
-  if has_command tput; then
-    command tput "$@"
+  if has_command tput && [[ -n "$TERM" ]]; then
+    command tput "$@" 2>/dev/null || true
   fi
 }
 
