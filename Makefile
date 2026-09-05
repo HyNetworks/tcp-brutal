@@ -13,6 +13,14 @@ brutal-objs     := brutal_cc.o brutal_sockopt.o brutal_rules.o
 
 ccflags-y := -std=gnu99
 
+# Kernels with the BBRv3 patchset (XanMod and others) replace the min_tso_segs
+# hook with tso_segs(sk, mss_now), which returns the burst size instead of a
+# floor. No version macro covers it, so look at the headers being built against.
+TCP_H := $(or $(srctree),$(KERNEL_DIR))/include/net/tcp.h
+ifneq ($(shell grep -Eq '\(\*tso_segs\)\(struct sock \*sk, unsigned int mss_now\)' $(TCP_H) 2>/dev/null && echo y),)
+ccflags-y += -DBRUTAL_HAVE_TSO_SEGS
+endif
+
 .PHONY: all clean load unload
 .PHONY: .always-make
 
