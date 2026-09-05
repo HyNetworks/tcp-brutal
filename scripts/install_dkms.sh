@@ -625,14 +625,34 @@ dkms_install_tarball() {
   fi
 }
 
+# brutalctl is a user-space program and needs the C library headers. Unlike
+# the kernel module, which only needs linux-headers, and unlike the compiler
+# itself, they are not pulled in by dkms (e.g. apt --no-install-recommends).
+install_libc_headers() {
+  local _cc="$1"
+  local _package
+
+  if echo '#include <errno.h>' | "$_cc" -E -x c - >/dev/null 2>&1; then
+    return 0
+  fi
+  if has_command apt; then
+    _package="libc6-dev"
+  elif has_command dnf || has_command yum || has_command zypper; then
+    _package="glibc-devel"
+  else
+    return 1
+  fi
+  echo "Installing missing dependence '$_package' ... "
+  detect_package_manager && $PACKAGE_MANAGEMENT_INSTALL "$_package"
+}
+
 brutalctl_install() {
   local _version="$(dkms_get_installed_versions "$DKMS_MODULE_NAME" | head -1)"
   local _source="/usr/src/$DKMS_MODULE_NAME-${_version#v}/tools/brutalctl.c"
   local _cc
 
-  echo -n "Installing brutalctl to $BRUTALCTL_PATH ... "
   if [[ ! -f "$_source" ]]; then
-    echo "skipped (not part of $_version)"
+    echo "Installing brutalctl to $BRUTALCTL_PATH ... skipped (not part of $_version)"
     return
   fi
   if has_command cc; then
@@ -640,9 +660,11 @@ brutalctl_install() {
   elif has_command gcc; then
     _cc="gcc"
   else
-    echo "skipped (no C compiler)"
+    echo "Installing brutalctl to $BRUTALCTL_PATH ... skipped (no C compiler)"
     return
   fi
+  install_libc_headers "$_cc" || true
+  echo -n "Installing brutalctl to $BRUTALCTL_PATH ... "
   if "$_cc" -O2 -Wall -o "$BRUTALCTL_PATH" "$_source"; then
     echo "ok"
   else
