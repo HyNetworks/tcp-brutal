@@ -4,10 +4,12 @@
  * A rule, kept by the kernel module in /proc/net/tcp_brutal/rules, puts every
  * connection to a destination prefix into one group sharing a rate, without
  * application support. For the kernel to actually use brutal for those
- * connections a route to the prefix must select it, so unless "noroute" is
- * given, add installs one with the ip command (same next hop as today, plus
- * "congctl lock brutal") and del/flush remove it. Routes created here carry
- * protocol 233 and never touch routes created by anything else.
+ * connections a route to the prefix must select it.
+ *
+ * Non-default prefixes use dedicated protocol-233 routes. Default routes are
+ * modified in place so their gateway/dev/metric/onlink attributes are kept;
+ * del/flush remove only the congctl attribute instead of deleting the default
+ * route itself.
  *
  * Build: cc -O2 -Wall -o brutalctl brutalctl.c
  */
@@ -32,9 +34,9 @@ static int usage(void)
           "       brutalctl flush\n"
           "\n"
           "All connections to the prefix share the rate as one group. add also installs\n"
-          "the route that makes the kernel use brutal for the prefix (ip route replace\n"
-          "<prefix> ... congctl lock brutal proto " ROUTE_PROTO "); del and flush remove it.\n"
-          "nolock lets applications set their own params on these connections.\n",
+          "the route that makes the kernel use brutal for the prefix. Dedicated prefix\n"
+          "routes use protocol " ROUTE_PROTO "; default routes are modified in place and\n"
+          "preserved by del/flush. nolock lets applications set their own params.\n",
           stderr);
     return 2;
 }
@@ -83,6 +85,97 @@ static char *ip_family(const char *prefix)
     return strchr(prefix, ':') ? "-6" : "-4";
 }
 
+static int is_default_prefix(const char *prefix)
+{
+    return !strcmp(prefix, "0.0.0.0/0") || !strcmp(prefix, "::/0");
+}
+
+/* Read the first default route and replace it with the same attributes, either
+ * adding or removing congctl brutal. This intentionally does not change the
+ * route protocol, gateway, device, metric, onlink, src, mtu, pref, etc. */
+static int default_route_update(const char *prefix, int enable, int lock, int quiet)
+{
+    char out[2048], *tok, *save, *nl;
+    char *argv[96];
+    char *show[] = {"ip", ip_family(prefix), "route", "show", "default", NULL};
+    int n = 0;
+
+    if (run(show, out, sizeof(out), 1) != 0 || !out[0])
+    {
+        if (!quiet)
+            fprintf(stderr, "brutalctl: no default route for %s\n", prefix);
+        return 1;
+    }
+
+    nl = strchr(out, '\n');
+    if (nl)
+        *nl = 0;
+
+    argv[n++] = "ip";
+    argv[n++] = ip_family(prefix);
+    argv[n++] = "route";
+    argv[n++] = "replace";
+
+    for (tok = strtok_r(out, " \t", &save); tok && n < 88; tok = strtok_r(NULL, " \t", &save))
+    {
+        if (!strcmp(tok, "congctl"))
+        {
+            tok = strtok_r(NULL, " \t", &save);
+            if (tok && !strcmp(tok, "lock"))
+                tok = strtok_r(NULL, " \t", &save);
+            continue;
+        }
+        argv[n++] = tok;
+    }
+
+    if (enable)
+    {
+        argv[n++] = "congctl";
+        if (lock)
+            argv[n++] = "lock";
+        argv[n++] = "brutal";
+    }
+    argv[n] = NULL;
+
+    if (run(argv, NULL, 0, quiet) != 0)
+    {
+        if (!quiet)
+            fprintf(stderr, "brutalctl: failed to %s brutal on default route\n",
+                    enable ? "enable" : "disable");
+        return 1;
+    }
+    return 0;
+}
+
+static int default_route_present(const char *prefix)
+{
+    char out[4096], *line, *lsave;
+    char *show[] = {"ip", ip_family(prefix), "route", "show", "default", NULL};
+
+    if (run(show, out, sizeof(out), 1) != 0)
+        return 0;
+
+    for (line = strtok_r(out, "\n", &lsave); line; line = strtok_r(NULL, "\n", &lsave))
+    {
+        char copy[2048], *tok, *save;
+
+        snprintf(copy, sizeof(copy), "%s", line);
+        for (tok = strtok_r(copy, " \t", &save); tok; tok = strtok_r(NULL, " \t", &save))
+        {
+            if (!strcmp(tok, "congctl"))
+            {
+                tok = strtok_r(NULL, " \t", &save);
+                if (tok && !strcmp(tok, "lock"))
+                    tok = strtok_r(NULL, " \t", &save);
+                if (tok && !strcmp(tok, "brutal"))
+                    return 1;
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
 /* How the prefix is reached today. Returns 0 with dev (and via, if any),
  * 1 for a local address, -1 if there is no route or ip failed. */
 static int route_lookup(const char *prefix, char *via, size_t vsize, char *dev, size_t dsize)
@@ -112,8 +205,12 @@ static int route_add(const char *prefix, int lock)
 {
     char via[64], dev[32];
     char *argv[16];
-    int n = 0, r = route_lookup(prefix, via, sizeof(via), dev, sizeof(dev));
+    int n = 0, r;
 
+    if (is_default_prefix(prefix))
+        return default_route_update(prefix, 1, lock, 0);
+
+    r = route_lookup(prefix, via, sizeof(via), dev, sizeof(dev));
     if (r)
     {
         fprintf(stderr, "brutalctl: rule added, but no route installed: %s\n",
@@ -149,9 +246,17 @@ static int route_add(const char *prefix, int lock)
 
 static void route_del(const char *prefix)
 {
-    char *argv[] = {"ip", ip_family(prefix), "route", "del", (char *)prefix, "proto", ROUTE_PROTO, NULL};
+    if (is_default_prefix(prefix))
+    {
+        default_route_update(prefix, 0, 0, 1);
+        return;
+    }
 
-    run(argv, NULL, 0, 1); /* may not exist (noroute) */
+    {
+        char *argv[] = {"ip", ip_family(prefix), "route", "del", (char *)prefix,
+                        "proto", ROUTE_PROTO, NULL};
+        run(argv, NULL, 0, 1);
+    }
 }
 
 static void route_flush(void)
@@ -159,6 +264,8 @@ static void route_flush(void)
     char *v4[] = {"ip", "-4", "route", "flush", "proto", ROUTE_PROTO, NULL};
     char *v6[] = {"ip", "-6", "route", "flush", "proto", ROUTE_PROTO, NULL};
 
+    default_route_update("0.0.0.0/0", 0, 0, 1);
+    default_route_update("::/0", 0, 0, 1);
     run(v4, NULL, 0, 1);
     run(v6, NULL, 0, 1);
 }
@@ -168,6 +275,9 @@ static int route_present(const char *dst, char *routes)
 {
     char canon[80], *line, *save;
     const char *slash = strchr(dst, '/');
+
+    if (is_default_prefix(dst))
+        return default_route_present(dst);
 
     for (line = strtok_r(routes, "\n", &save); line; line = strtok_r(NULL, "\n", &save))
     {
