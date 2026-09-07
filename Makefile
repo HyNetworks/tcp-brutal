@@ -1,5 +1,8 @@
 KERNEL_RELEASE  ?= $(shell uname -r)
 KERNEL_DIR      ?= /lib/modules/$(KERNEL_RELEASE)/build
+# Modules for a clang-built kernel (CONFIG_CC_IS_CLANG) must be built with LLVM=1
+KERNEL_CONFIG   := $(firstword $(wildcard $(KERNEL_DIR)/include/config/auto.conf $(KERNEL_DIR)/.config))
+KBUILD_LLVM     := $(if $(KERNEL_CONFIG),$(if $(shell grep -qs '^CONFIG_CC_IS_CLANG=y' $(KERNEL_CONFIG) && echo y),LLVM=1))
 DKMS_TARBALL    ?= dkms.tar.gz
 TAR             ?= tar
 CLANG_FORMAT    ?= clang-format-18
@@ -14,10 +17,10 @@ ccflags-y := -std=gnu99
 .PHONY: .always-make
 
 all:
-	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) modules
+	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) $(KBUILD_LLVM) modules
 
 clean: clean-dkms.conf clean-dkms-tarball
-	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) clean
+	$(MAKE) -C $(KERNEL_DIR) M=$(PWD) $(KBUILD_LLVM) clean
 
 load:
 	sudo insmod brutal.ko

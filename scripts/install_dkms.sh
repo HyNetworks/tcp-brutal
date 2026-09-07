@@ -347,6 +347,37 @@ check_linux_headers() {
   fi
 }
 
+# A clang-built kernel (CONFIG_CC_IS_CLANG) needs clang, lld and llvm to build modules
+is_clang_kernel() {
+  local _build="/lib/modules/$(uname -r)/build"
+  local _config
+
+  for _config in "$_build/include/config/auto.conf" "$_build/.config" "/boot/config-$(uname -r)"; do
+    if [[ -f "$_config" ]]; then
+      if grep -q '^CONFIG_CC_IS_CLANG=y' "$_config"; then
+        return 0
+      fi
+      return 1
+    fi
+  done
+  return 1
+}
+
+check_llvm_toolchain() {
+  if ! is_clang_kernel; then
+    return
+  fi
+  echo -n "Checking LLVM toolchain (kernel built with clang) ... "
+  if has_command clang && has_command ld.lld && has_command llvm-objcopy; then
+    echo "ok"
+    return
+  fi
+  echo "not installed"
+  install_software clang
+  install_software lld
+  install_software llvm
+}
+
 check_environment() {
   check_environment_operating_system
   check_environment_curl
@@ -883,6 +914,8 @@ perform_install() {
     # clean auto downloaded tarball
     rm -f "$_local_file"
   fi
+
+  check_llvm_toolchain
 
   echo "Rebuilding DKMS modules as needed ... "
   if ! dkms autoinstall; then
