@@ -8,6 +8,8 @@ TCP Brutal 是 [Hysteria](https://hysteria.network/) 的 Brutal 拥塞控制算�
 
 > **v2 新特性：** TCP Brutal 不再需要上层应用专门适配。只需为某个目标地址设置一次速率，任何程序、任何基于 TCP 的协议，所有连向该地址的连接都会自动使用 Brutal。不必哀求开发者支持，现在你就能用！
 
+https://github.com/user-attachments/assets/ba5f938b-265a-49a5-8b60-ce7efac0c6e2
+
 ## 快速开始
 
 ### 安装
